@@ -1,0 +1,34 @@
+---
+import TelemetryPanel from '../components/thingsboard/TelemetryPanel';
+import { startEnvironmentWatcher } from '../utils/runtime-env';
+---
+
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ThingsBoard Telemetry</title>
+  </head>
+  <body class="min-h-screen bg-gray-50">
+    <main class="max-w-5xl mx-auto px-4 py-8">
+      <header class="mb-6">
+        <h1 class="text-3xl font-semibold tracking-tight">ThingsBoard Telemetry</h1>
+        <p class="text-sm text-gray-600 mt-1">Monitor device telemetry in realtime with WebSocket and fallback polling.</p>
+      </header>
+
+      <TelemetryPanel client:load />
+    </main>
+
+    <script>
+      // Initialize runtime environment monitoring for ThingsBoard
+      document.addEventListener('DOMContentLoaded', () => {
+        console.log('🔍 ThingsBoard Telemetry page loaded, monitoring runtime environment...');
+        
+        // Listen for runtime environment changes
+        window.addEventListener('runtime-env-changed', (event) => {
+          console.log('🔄 Runtime environment changed on ThingsBoard page:', event.detail);
+        });
+      });
+    </script>
+  </body>
+</html>

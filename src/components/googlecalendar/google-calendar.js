@@ -1,6 +1,6 @@
 // Google Calendar API configuration
 const DISCOVERY_DOC = 'https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest';
-const SCOPES = 'https://www.googleapis.com/auth/calendar.readonly';
+const SCOPES = 'https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.events.readonly https://www.googleapis.com/auth/calendar.events';
 
 // Dynamic credentials from runtime environment
 let CLIENT_ID = '';
@@ -298,8 +298,8 @@ export const signOut = async () => {
   }
 };
 
-// List calendar events
-export const listEvents = async () => {
+// List all calendars the user has access to
+export const listCalendars = async () => {
   if (!isInitialized()) {
     throw new Error('Google API not initialized');
   }
@@ -310,28 +310,208 @@ export const listEvents = async () => {
   }
   
   try {
-    const timeMin = new Date();
-    timeMin.setHours(0, 0, 0, 0);
-    
-    const response = await window.gapi.client.calendar.events.list({
-      'calendarId': 'primary',
-      'timeMin': timeMin.toISOString(),
-      'showDeleted': false,
-      'singleEvents': true,
-      'maxResults': 50,
-      'orderBy': 'startTime'
+    const response = await window.gapi.client.calendar.calendarList.list({
+      'minAccessRole': 'reader'
     });
     
+    console.log('Available calendars:', response.result.items?.length || 0);
     return response;
   } catch (err) {
-    console.error('Error fetching events:', err);
+    console.error('Error fetching calendars:', err);
     
     // Handle token expiration
     if (err.status === 401) {
-      // Token expired, try to refresh
       try {
         await signIn();
-        return listEvents(); // Try again after signing in
+        return listCalendars(); // Try again after signing in
+      } catch (refreshErr) {
+        throw refreshErr;
+      }
+    }
+    
+    throw err;
+  }
+};
+
+// List events from a specific calendar
+export const listEventsFromCalendar = async (calendarId, maxResults = 50, daysInPast = 30, selectedDate = null, specificDate = false) => {
+  if (!isInitialized()) {
+    throw new Error('Google API not initialized');
+  }
+  
+  // Check if we have a token
+  if (!window.gapi.client.getToken()) {
+    throw new Error('Not signed in', { status: 401 });
+  }
+  
+  try {
+    let timeMin, timeMax;
+    
+    if (selectedDate && specificDate) {
+      // If a specific date is selected, get events for that day only
+      timeMin = new Date(selectedDate);
+      timeMin.setHours(0, 0, 0, 0);
+      timeMax = new Date(selectedDate);
+      timeMax.setHours(23, 59, 59, 999);
+    } else if (selectedDate) {
+      // If a specific date is selected, get events for that month
+      timeMin = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1);
+      timeMax = new Date(selectedDate.getFullYear(), selectedDate.getMonth() + 1, 0, 23, 59, 59);
+    } else {
+      // Default behavior: get events from past days to future
+      timeMin = new Date();
+      timeMin.setDate(timeMin.getDate() - daysInPast);
+      timeMin.setHours(0, 0, 0, 0);
+    }
+    
+    const requestParams = {
+      'calendarId': calendarId,
+      'timeMin': timeMin.toISOString(),
+      'showDeleted': false,
+      'singleEvents': true,
+      'maxResults': maxResults,
+      'orderBy': 'startTime'
+    };
+    
+    if (timeMax) {
+      requestParams.timeMax = timeMax.toISOString();
+    }
+    
+    const response = await window.gapi.client.calendar.events.list(requestParams);
+    
+    return response;
+  } catch (err) {
+    console.error(`Error fetching events from calendar ${calendarId}:`, err);
+    
+    // Handle token expiration
+    if (err.status === 401) {
+      try {
+        await signIn();
+        return listEventsFromCalendar(calendarId, maxResults, daysInPast, selectedDate, specificDate);
+      } catch (refreshErr) {
+        throw refreshErr;
+      }
+    }
+    
+    // Handle 403 Forbidden errors (no access to calendar or quota exceeded)
+    if (err.status === 403) {
+      // Check if it's a quota exceeded error
+      if (err.body && err.body.includes('rateLimitExceeded')) {
+        console.warn(`Quota exceeded for calendar ${calendarId}. Skipping to prevent authentication issues.`);
+        return { result: { items: [] } };
+      } else {
+        console.warn(`Access denied to calendar ${calendarId}. User may not have permission to read events from this calendar.`);
+        return { result: { items: [] } };
+      }
+    }
+    
+    // Don't throw for individual calendar errors - just return empty result
+    const errorMessage = err.message || err.body || err.statusText || 'Unknown error';
+    console.warn(`Skipping calendar ${calendarId} due to error (${err.status || 'unknown status'}):`, errorMessage);
+    return { result: { items: [] } };
+  }
+};
+
+// List calendar events from all accessible calendars
+export const listEvents = async (selectedDate = null, specificDate = false) => {
+  if (!isInitialized()) {
+    throw new Error('Google API not initialized');
+  }
+  
+  // Check if we have a token
+  if (!window.gapi.client.getToken()) {
+    throw new Error('Not signed in', { status: 401 });
+  }
+  
+  try {
+    // First, get all calendars
+    const calendarsResponse = await listCalendars();
+    const calendars = calendarsResponse.result.items || [];
+    
+    console.log(`Fetching events from ${calendars.length} calendars...`);
+    
+    // Fetch events from all calendars in parallel
+    const eventPromises = calendars.map(async (calendar) => {
+      try {
+        const eventsResponse = await listEventsFromCalendar(calendar.id, 20, 30, selectedDate, specificDate); // Show events from selected date or last 30 days
+        const events = eventsResponse.result.items || [];
+        
+        // Add calendar information to each event
+        return events.map(event => ({
+          ...event,
+          calendarId: calendar.id,
+          calendarName: calendar.summary,
+          calendarColor: calendar.backgroundColor || calendar.colorId,
+          isPrimary: calendar.primary || false
+        }));
+      } catch (err) {
+        // More specific error handling for different error types
+        if (err.status === 403) {
+          console.warn(`Access denied to calendar "${calendar.summary}" (${calendar.id}). User may not have permission to read events.`);
+        } else if (err.status === 404) {
+          console.warn(`Calendar "${calendar.summary}" (${calendar.id}) not found. It may have been deleted or access revoked.`);
+        } else {
+          const errorMessage = err.message || err.body || err.statusText || 'Unknown error';
+          console.warn(`Failed to fetch events from calendar "${calendar.summary}" (${calendar.id}):`, errorMessage);
+        }
+        return [];
+      }
+    });
+    
+    // Wait for all calendar event fetches to complete
+    const allCalendarEvents = await Promise.all(eventPromises);
+    
+    // Flatten and merge all events
+    const allEvents = allCalendarEvents.flat();
+    
+    // Sort events by start time
+    allEvents.sort((a, b) => {
+      const aTime = new Date(a.start.dateTime || a.start.date);
+      const bTime = new Date(b.start.dateTime || b.start.date);
+      return aTime - bTime;
+    });
+    
+    // Count successful vs failed calendar fetches
+    const successfulCalendars = allCalendarEvents.filter(events => events.length > 0).length;
+    const totalCalendarsWithEvents = allCalendarEvents.filter(events => events.length >= 0).length;
+    
+    console.log(`Total events fetched: ${allEvents.length} from ${successfulCalendars}/${calendars.length} accessible calendars`);
+    
+    if (successfulCalendars < calendars.length) {
+      const skippedCount = calendars.length - totalCalendarsWithEvents;
+      if (skippedCount > 0) {
+        console.info(`Note: ${skippedCount} calendar(s) were skipped due to access restrictions. This is normal for calendars you don't have read permission for.`);
+      }
+    }
+    
+    // Return in the same format as the original API
+    return {
+      result: {
+        items: allEvents,
+        summary: `Events from ${successfulCalendars}/${calendars.length} accessible calendars`
+      }
+    };
+    
+  } catch (err) {
+    console.error('Error fetching events from all calendars:', err);
+    
+    // Handle quota exceeded errors - don't sign out the user
+    if (err.status === 403 && err.body && err.body.includes('rateLimitExceeded')) {
+      console.warn('Google Calendar API quota exceeded. Please wait a moment before trying again.');
+      // Return empty result instead of throwing to prevent sign out
+      return {
+        result: {
+          items: [],
+          summary: 'Quota exceeded - please try again later'
+        }
+      };
+    }
+    
+    // Handle token expiration
+    if (err.status === 401) {
+      try {
+        await signIn();
+        return listEvents(selectedDate, specificDate); // Try again after signing in
       } catch (refreshErr) {
         throw refreshErr;
       }
@@ -424,6 +604,195 @@ export const getCredentialsError = () => {
     return null;
   } catch (error) {
     return error.message;
+  }
+};
+
+// Create a new calendar event
+export const createEvent = async (eventData, calendarId = 'primary') => {
+  if (!isInitialized()) {
+    throw new Error('Google API not initialized');
+  }
+  
+  // Check if we have a token
+  if (!window.gapi.client.getToken()) {
+    throw new Error('Not signed in', { status: 401 });
+  }
+  
+  try {
+    console.log('Creating new calendar event:', eventData);
+    
+    // Prepare the event object for Google Calendar API
+    const event = {
+      summary: eventData.title,
+      location: eventData.location || '',
+      description: eventData.description || '',
+      start: {
+        dateTime: eventData.startDateTime,
+        timeZone: eventData.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+      },
+      end: {
+        dateTime: eventData.endDateTime,
+        timeZone: eventData.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+      },
+      attendees: eventData.attendees || [],
+      reminders: {
+        useDefault: eventData.useDefaultReminders !== false,
+        overrides: eventData.reminders || []
+      }
+    };
+    
+    // Handle all-day events
+    if (eventData.isAllDay) {
+      delete event.start.dateTime;
+      delete event.end.dateTime;
+      event.start.date = eventData.startDate;
+      event.end.date = eventData.endDate;
+    }
+    
+    const response = await window.gapi.client.calendar.events.insert({
+      calendarId: calendarId,
+      resource: event
+    });
+    
+    console.log('✅ Event created successfully:', response.result);
+    return response;
+    
+  } catch (err) {
+    console.error('❌ Error creating calendar event:', err);
+    
+    // Handle token expiration
+    if (err.status === 401) {
+      try {
+        await signIn();
+        return createEvent(eventData, calendarId); // Try again after signing in
+      } catch (refreshErr) {
+        throw refreshErr;
+      }
+    }
+    
+    // Handle permission errors
+    if (err.status === 403) {
+      throw new Error('Permission denied. You may not have write access to this calendar.');
+    }
+    
+    throw err;
+  }
+};
+
+// Update an existing calendar event
+export const updateEvent = async (eventId, eventData, calendarId = 'primary') => {
+  if (!isInitialized()) {
+    throw new Error('Google API not initialized');
+  }
+  
+  // Check if we have a token
+  if (!window.gapi.client.getToken()) {
+    throw new Error('Not signed in', { status: 401 });
+  }
+  
+  try {
+    console.log('Updating calendar event:', eventId, eventData);
+    
+    // Prepare the event object for Google Calendar API
+    const event = {
+      summary: eventData.title,
+      location: eventData.location || '',
+      description: eventData.description || '',
+      start: {
+        dateTime: eventData.startDateTime,
+        timeZone: eventData.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+      },
+      end: {
+        dateTime: eventData.endDateTime,
+        timeZone: eventData.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+      },
+      attendees: eventData.attendees || [],
+      reminders: {
+        useDefault: eventData.useDefaultReminders !== false,
+        overrides: eventData.reminders || []
+      }
+    };
+    
+    // Handle all-day events
+    if (eventData.isAllDay) {
+      delete event.start.dateTime;
+      delete event.end.dateTime;
+      event.start.date = eventData.startDate;
+      event.end.date = eventData.endDate;
+    }
+    
+    const response = await window.gapi.client.calendar.events.update({
+      calendarId: calendarId,
+      eventId: eventId,
+      resource: event
+    });
+    
+    console.log('✅ Event updated successfully:', response.result);
+    return response;
+    
+  } catch (err) {
+    console.error('❌ Error updating calendar event:', err);
+    
+    // Handle token expiration
+    if (err.status === 401) {
+      try {
+        await signIn();
+        return updateEvent(eventId, eventData, calendarId); // Try again after signing in
+      } catch (refreshErr) {
+        throw refreshErr;
+      }
+    }
+    
+    // Handle permission errors
+    if (err.status === 403) {
+      throw new Error('Permission denied. You may not have write access to this calendar.');
+    }
+    
+    throw err;
+  }
+};
+
+// Delete a calendar event
+export const deleteEvent = async (eventId, calendarId = 'primary') => {
+  if (!isInitialized()) {
+    throw new Error('Google API not initialized');
+  }
+  
+  // Check if we have a token
+  if (!window.gapi.client.getToken()) {
+    throw new Error('Not signed in', { status: 401 });
+  }
+  
+  try {
+    console.log('Deleting calendar event:', eventId);
+    
+    const response = await window.gapi.client.calendar.events.delete({
+      calendarId: calendarId,
+      eventId: eventId
+    });
+    
+    console.log('✅ Event deleted successfully');
+    return response;
+    
+  } catch (err) {
+    console.error('❌ Error deleting calendar event:', err);
+    
+    // Handle token expiration
+    if (err.status === 401) {
+      try {
+        await signIn();
+        return deleteEvent(eventId, calendarId); // Try again after signing in
+      } catch (refreshErr) {
+        throw refreshErr;
+      }
+    }
+    
+    // Handle permission errors
+    if (err.status === 403) {
+      throw new Error('Permission denied. You may not have write access to this calendar.');
+    }
+    
+    throw err;
   }
 };
 

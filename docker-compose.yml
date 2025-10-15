@@ -11,19 +11,38 @@ services:
       - LOG_LEVEL=INFO
       # Add any other environment variables here
     restart: unless-stopped
+
+  pkc-app:
+    image: henry768/pkc:latest_RAG_test
+    container_name: pkc-app
+    restart: unless-stopped
+    ports:
+      - "4321:4321"
+    # Load environment variables from .env file
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - TELEGRAM_PORT=${TELEGRAM_PORT}
+    volumes:
+      - ./.env:/app/.env:ro 
+    # Override command to use npm start directly (no entrypoint script needed)
+    command: ["npm", "start"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:49384/v1/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4321"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
-  pkc-app:
-    image: henry768/pkc@sha256:fd37862a6fb83be03e39e905bfe09df2ab51482df8798f34d7350c3d81872e17
-    container_name: pkc-app
+  telegram-bot:
+    image: henry768/telegram_bot:latest_telegram_bot
+    container_name: telegram-bot
     restart: unless-stopped
     ports:
-      - "4321:4321"
+      - "48637:48637"
     # Load environment variables from .env file
     env_file:
       - .env
@@ -37,7 +56,7 @@ services:
     # Override command to use npm start directly (no entrypoint script needed)
     command: ["npm", "start"]
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4321"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:48637"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -85,17 +104,14 @@ services:
           sleep 3
         done &&
         echo 'Ollama API is available!' &&
-        echo 'Pulling qwen3:0.6b model...' &&
         curl -s -X POST http://ollama:11434/api/pull -d '{"name":"qwen3:0.6b"}' &&
         echo 'Pulling nomic-embed-text model...' &&
         curl -s -X POST http://ollama:11434/api/pull -d '{"name":"nomic-embed-text"}' &&
         echo 'Model initialization completed successfully!'
 
-# Named volumes for data persistence
 volumes:
   mcard-data:
   runtime_env:
   ollama_data:
   vector_data:
   log_data:
-    # This will be automatically created by Docker Compose
